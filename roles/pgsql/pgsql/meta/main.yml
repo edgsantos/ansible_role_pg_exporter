@@ -1,7 +1,7 @@
 ---
 galaxy_info:
-  role_name: pg_exporters
-  description: deploy multiple pg_exporters
+  role_name: pgsql
+  description: init pgsql module on pigsty nodes
   min_ansible_version: "2.9"
   author: 'Ruohang Feng / @Vonng / rh@vonng.com'
   license: AGPLv3
@@ -14,5 +14,9 @@ galaxy_info:
       versions: [ 12, 11 ]
   galaxy_tags:
     - pigsty
-    - pg_exporter
+    - pgsql
+    - postgres
+    - patroni
+    - pgbouncer
+    - pgbackrest
 ...

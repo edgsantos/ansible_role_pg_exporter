@@ -1,0 +1,104 @@
+---
+#--------------------------------------------------------------#
+# Install PostgreSQL Packages                           [pg_pkg]
+#--------------------------------------------------------------#
+# to install the latest postgres packages, use pg_ext
+
+- name: install postgres packages
+  become: yes
+  tags: pg_pkg
+  block:
+
+    # this task will try to find each item in pg_extension_map first
+    # if found, the value will be used instead of the key
+    # if not found, the key will be not modified, and used as raw extension name
+    - name: lookup pg packages & extensions names
+      tags: pg_extension
+      become: no
+      connection: local
+      set_fact:
+        pg_packages_list: |-
+          {% set pkg_map = package_map | default({}) %}
+          {% for pkg_list in pg_packages %}{% for pkg in pkg_list | trim | regex_replace('(,|\\s)+', ',') | regex_findall('([^,\\s]+)') | default([]) %}{% if pkg != '' %}{% if pkg in pkg_map %}{% set pkg = pkg_map[pkg] %}{% endif %}{% if not loop.first %},{% endif %}{{ pkg|replace('${pg_version}', pg_version|string)|replace('$v', pg_version|string) }}{% endif %}{% endfor %}
+          
+          {% endfor %}
+        pg_extension_list: |-
+          {% set pkg_map = package_map | default({}) %}
+          {% for ext_list in pg_extensions %}{% for ext in ext_list | trim | regex_replace('(,|\\s)+', ',') | regex_findall('([^,\\s]+)') | default([]) %}{% if ext != '' %}{% if ext in pkg_map %}{% set ext = pkg_map[ext] %}{% endif %}{% if not loop.first %},{% endif %}{{ ext|replace('${pg_version}', pg_version|string)|replace('$v', pg_version|string) }}{% endif %}{% endfor %}
+          
+          {% endfor %}
+
+    # install postgres basic packages
+    - name: install postgres packages
+      environment: "{{ proxy_env | default({}) }}"
+      package: name={{ item }} state=present
+      with_items: "{{ pg_packages_list | trim | regex_findall('[^\\n]+') | map('replace', '$v', pg_version|string) | list | map('replace', '${pg_version}', pg_version|string) | map('regex_replace', '(,|\\s)+', ',' ) | list }}"
+
+    # install postgres extensions
+    - name: install postgres extensions
+      tags: pg_extension
+      environment: "{{ proxy_env | default({}) }}"
+      package: name={{ item }} state=latest
+      with_items: "{{ pg_extension_list | trim | regex_findall('([^\\n]+)') | map('replace', '$v', pg_version|string) | list | map('replace', '${pg_version}', pg_version|string) | map('regex_replace', '(,|\\s)+', ',' ) | list }}"
+
+    # fix rpm trash and unused service file, shut debian default service
+    - name: post installation cleanups
+      tags: pg_post
+      ignore_errors: true
+      shell: |
+        {% if os_package|default('rpm') == 'rpm' %}
+        rm -rf /usr/lib/systemd/system/postgresql-{{ pg_version }}.service # rhel
+        rm -rf '/%{_sysconfigdir}'   # introduced by patroni rpm
+        rm -rf '/%{_logdir}'         # remove these if patroni rpm fixed
+        chown -R {{ pg_dbsu }}:postgres /var/run/postgresql /var/lib/pgsql || /bin/true;
+        
+        {% elif os_package|default('rpm') == 'deb' %}
+        # kill the default debian service
+        systemctl stop --no-block postgresql   # the auto-started debian/ubuntu service
+        systemctl stop --no-block postgresql@{{ pg_version|default('17') }}-main
+        systemctl disable --no-block postgresql
+        systemctl disable --no-block postgresql@{{ pg_version|default('17') }}-main
+        rm -rf /lib/systemd/system/postgresql.service rm -rf /lib/systemd/system/postgresql@.service
+        if ps -u postgres -o pid:1,command | grep -E 'postmaster|postgres:|-D' | grep 'config_file=/etc/postgresql/.*/main/postgresql.conf' ; then
+            {{ pg_bin_dir }}/pg_ctl -D /var/lib/postgresql/{{ pg_version }}/main stop --mode=immediate
+        fi
+        if ps -u postgres -o pid:1,command | grep -E 'postmaster|postgres:|-D' | grep 'config_file=/etc/postgresql/.*/main/postgresql.conf' ; then
+            sleep 2
+            ps -u postgres -o pid:1,command | grep -E 'postmaster|postgres:|-D' | grep '/etc/postgresql/*/main/postgresql.conf' | awk '{print $1}' | xargs kill -9
+        fi
+        rm -rf /lib/systemd/system/postgresql.service /lib/systemd/system/postgresql@.service
+        chown -R {{ pg_dbsu }}:postgres /var/run/postgresql /var/lib/postgresql /etc/postgresql || /bin/true;
+        {% endif %}
+        chown -R {{ pg_dbsu }}:postgres "{{ pg_dbsu_home }}"
+        systemctl daemon-reload;
+        /bin/true;
+      args: { executable: /bin/bash }
+
+
+#--------------------------------------------------------------#
+# Setup bin path                                       [pg_path]
+#--------------------------------------------------------------#
+# soft link pgsql bin dir to specific pgsql binary version according to pg_mode
+- name: link pg bin dir to current version
+  tags: pg_path
+  file: src="{{ pg_home_dir }}" dest={{ pg_bin_dir | dirname }} state=link
+  vars: { pg_home_dir: "{{ pg_home_map[pg_mode] | replace('$v', pg_version) | replace('${pg_version}', pg_version )}}" }
+
+
+#--------------------------------------------------------------#
+# Setup pgsql profile                                   [pg_env]
+#--------------------------------------------------------------#
+# add {{ pg_bin_dir }} to PATH environment variable
+- name: add pgsql path to system profile
+  tags: pg_env
+  copy:
+    dest: /etc/profile.d/pgsql.sh
+    mode: 0755
+    content: |
+      export PATH="{{ pg_bin_dir }}:/pg/bin:$PATH"
+      export PGHOME={{ pg_bin_dir | dirname }}
+      export PGDATA={{ pg_data }}
+      export PGPORT={{ pg_port }}
+      export PGDATABASE={{ pg_primary_db }}
+
+...
